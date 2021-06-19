@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"strings"
 
@@ -116,22 +117,42 @@ func toSerializableResponse(res *http.Response) HTTPResponse {
 	}
 }
 
-func httpParser(ip *layers.IPv4, pkt gopacket.Packet, tcp *layers.TCP) bool {
+func httpParser(srcIP, dstIP net.IP, payload []byte, pkt gopacket.Packet, tcp *layers.TCP) bool {
 	data := tcp.Payload
 	if req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(data))); err == nil {
-		NewSnifferEvent(
-			pkt.Metadata().Timestamp,
-			"http.request",
-			ip.SrcIP.String(),
-			req.Host,
-			toSerializableRequest(req),
-			"%s %s %s %s%s",
-			tui.Wrap(tui.BACKRED+tui.FOREBLACK, "http"),
-			vIP(ip.SrcIP),
-			tui.Wrap(tui.BACKLIGHTBLUE+tui.FOREBLACK, req.Method),
-			tui.Yellow(req.Host),
-			vURL(req.URL.String()),
-		).Push()
+		if user, pass, ok := req.BasicAuth(); ok {
+			NewSnifferEvent(
+				pkt.Metadata().Timestamp,
+				"http.request",
+				srcIP.String(),
+				req.Host,
+				toSerializableRequest(req),
+				"%s %s %s %s%s - %s %s, %s %s",
+				tui.Wrap(tui.BACKRED+tui.FOREBLACK, "http"),
+				vIP(srcIP),
+				tui.Wrap(tui.BACKLIGHTBLUE+tui.FOREBLACK, req.Method),
+				tui.Yellow(req.Host),
+				vURL(req.URL.String()),
+				tui.Bold("USER"),
+				tui.Red(user),
+				tui.Bold("PASS"),
+				tui.Red(pass),
+			).Push()
+		} else {
+			NewSnifferEvent(
+				pkt.Metadata().Timestamp,
+				"http.request",
+				srcIP.String(),
+				req.Host,
+				toSerializableRequest(req),
+				"%s %s %s %s%s",
+				tui.Wrap(tui.BACKRED+tui.FOREBLACK, "http"),
+				vIP(srcIP),
+				tui.Wrap(tui.BACKLIGHTBLUE+tui.FOREBLACK, req.Method),
+				tui.Yellow(req.Host),
+				vURL(req.URL.String()),
+			).Push()
+		}
 
 		return true
 	} else if res, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(data)), nil); err == nil {
@@ -139,15 +160,15 @@ func httpParser(ip *layers.IPv4, pkt gopacket.Packet, tcp *layers.TCP) bool {
 		NewSnifferEvent(
 			pkt.Metadata().Timestamp,
 			"http.response",
-			ip.SrcIP.String(),
-			ip.DstIP.String(),
+			srcIP.String(),
+			dstIP.String(),
 			sres,
 			"%s %s:%d %s -> %s (%s %s)",
 			tui.Wrap(tui.BACKRED+tui.FOREBLACK, "http"),
-			vIP(ip.SrcIP),
+			vIP(srcIP),
 			tcp.SrcPort,
 			tui.Bold(res.Status),
-			vIP(ip.DstIP),
+			vIP(dstIP),
 			tui.Dim(humanize.Bytes(uint64(len(sres.Body)))),
 			tui.Yellow(sres.ContentType),
 		).Push()

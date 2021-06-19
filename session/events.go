@@ -37,25 +37,55 @@ func (e Event) Label() string {
 	return color + label + tui.RESET
 }
 
+type EventBus <-chan Event
+
+type PrintCallback func(format string, args ...interface{})
+
+type PrintWriter struct {
+	pool *EventPool
+}
+
+func (w PrintWriter) Write(p []byte) (n int, err error) {
+	w.pool.Printf("%s", string(p))
+	return len(p), nil
+}
+
 type EventPool struct {
-	sync.Mutex
+	*sync.Mutex
 
 	debug     bool
 	silent    bool
 	events    []Event
 	listeners []chan Event
+	printLock sync.Mutex
+	printCbs  []PrintCallback
+	Stdout    PrintWriter
 }
 
 func NewEventPool(debug bool, silent bool) *EventPool {
-	return &EventPool{
+	pool := &EventPool{
+		Mutex:     &sync.Mutex{},
 		debug:     debug,
 		silent:    silent,
 		events:    make([]Event, 0),
 		listeners: make([]chan Event, 0),
+		printCbs:  make([]PrintCallback, 0),
 	}
+
+	pool.Stdout = PrintWriter{
+		pool: pool,
+	}
+
+	return pool
 }
 
-func (p *EventPool) Listen() <-chan Event {
+func (p *EventPool) OnPrint(cb PrintCallback) {
+	p.printLock.Lock()
+	defer p.printLock.Unlock()
+	p.printCbs = append(p.printCbs, cb)
+}
+
+func (p *EventPool) Listen() EventBus {
 	p.Lock()
 	defer p.Unlock()
 	l := make(chan Event)
@@ -65,9 +95,7 @@ func (p *EventPool) Listen() <-chan Event {
 	go func() {
 		for i := len(p.events) - 1; i >= 0; i-- {
 			defer func() {
-				if recover() != nil {
-
-				}
+				recover()
 			}()
 			l <- p.events[i]
 		}
@@ -77,7 +105,7 @@ func (p *EventPool) Listen() <-chan Event {
 	return l
 }
 
-func (p *EventPool) Unlisten(listener <-chan Event) {
+func (p *EventPool) Unlisten(listener EventBus) {
 	p.Lock()
 	defer p.Unlock()
 
@@ -122,6 +150,16 @@ func (p *EventPool) Add(tag string, data interface{}) {
 			ch <- e
 		}(l)
 	}
+}
+
+func (p *EventPool) Printf(format string, a ...interface{}) {
+	p.printLock.Lock()
+	defer p.printLock.Unlock()
+
+	for _, cb := range p.printCbs {
+		cb(format, a...)
+	}
+	fmt.Printf(format, a...)
 }
 
 func (p *EventPool) Log(level log.Verbosity, format string, args ...interface{}) {

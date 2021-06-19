@@ -2,7 +2,7 @@ package net_recon
 
 import (
 	"fmt"
-	"os"
+	"github.com/bettercap/bettercap/modules/syn_scan"
 	"sort"
 	"strings"
 	"time"
@@ -13,6 +13,7 @@ import (
 	"github.com/dustin/go-humanize"
 
 	"github.com/evilsocket/islazy/tui"
+	"github.com/evilsocket/islazy/str"
 )
 
 const (
@@ -223,7 +224,7 @@ func (mod *Discovery) showStatusBar() {
 		parts = append(parts, fmt.Sprintf("%d errs", nErrors))
 	}
 
-	fmt.Printf("\n%s\n\n", strings.Join(parts, " / "))
+	mod.Printf("\n%s\n\n", strings.Join(parts, " / "))
 }
 
 func (mod *Discovery) Show(arg string) (err error) {
@@ -263,7 +264,7 @@ func (mod *Discovery) Show(arg string) (err error) {
 		}
 	}
 
-	tui.Table(os.Stdout, colNames, rows)
+	tui.Table(mod.Session.Events.Stdout, colNames, rows)
 
 	mod.showStatusBar()
 
@@ -298,14 +299,34 @@ func (mod *Discovery) showMeta(arg string) (err error) {
 			}
 
 			for _, k := range keys {
+				meta := t.Meta.Get(k)
+				val := ""
+				if s, ok := meta.(string); ok {
+					val = s
+				} else if ports, ok := meta.(map[int]*syn_scan.OpenPort); ok {
+					val = "ports: "
+					for _, info := range ports {
+						val += fmt.Sprintf("%s:%d", info.Proto, info.Port)
+						if info.Service != "" {
+							val += fmt.Sprintf("(%s)", info.Service)
+						}
+						if info.Banner != "" {
+							val += fmt.Sprintf(" [%s]", info.Banner)
+						}
+						val += " "
+					}
+					val = str.Trim(val)
+				} else {
+					val = fmt.Sprintf("%#v", meta)
+				}
 				rows = append(rows, []string{
 					tui.Green(k),
-					tui.Yellow(t.Meta.Get(k).(string)),
+					tui.Yellow(val),
 				})
 			}
 
 			any = true
-			tui.Table(os.Stdout, colNames, rows)
+			tui.Table(mod.Session.Events.Stdout, colNames, rows)
 		}
 	}
 

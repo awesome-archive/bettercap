@@ -167,6 +167,12 @@ type scanJob struct {
 func (mod *SynScanner) scanWorker(job async.Job) {
 	scan := job.(scanJob)
 
+	fromHW := mod.Session.Interface.HW
+	fromIP := mod.Session.Interface.IP
+	if scan.Address.To4() == nil {
+		fromIP = mod.Session.Interface.IPv6
+	}
+
 	for dstPort := mod.startPort; dstPort < mod.endPort+1; dstPort++ {
 		if !mod.Running() {
 			break
@@ -174,7 +180,7 @@ func (mod *SynScanner) scanWorker(job async.Job) {
 
 		atomic.AddUint64(&mod.stats.doneProbes, 1)
 
-		err, raw := packets.NewTCPSyn(mod.Session.Interface.IP, mod.Session.Interface.HW, scan.Address, scan.Mac, synSourcePort, dstPort)
+		err, raw := packets.NewTCPSyn(fromIP, fromHW, scan.Address, scan.Mac, synSourcePort, dstPort)
 		if err != nil {
 			mod.Error("error creating SYN packet: %s", err)
 			continue
@@ -227,8 +233,8 @@ func (mod *SynScanner) synScan() error {
 		mod.State.Store("progress", 0.0)
 
 		// start the collector
+		mod.waitGroup.Add(1)
 		go func() {
-			mod.waitGroup.Add(1)
 			defer mod.waitGroup.Done()
 
 			for packet := range mod.packets {

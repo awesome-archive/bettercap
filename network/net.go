@@ -101,16 +101,18 @@ func ParseTargets(targets string, aliasMap *data.UnsortedKV) (ips []net.IP, macs
 
 	// first isolate MACs and parse them
 	for _, mac := range macParser.FindAllString(targets, -1) {
-		mac = NormalizeMac(mac)
-		hw, err := net.ParseMAC(mac)
+		normalizedMac := NormalizeMac(mac)
+		hw, err := net.ParseMAC(normalizedMac)
 		if err != nil {
-			return nil, nil, fmt.Errorf("error while parsing MAC '%s': %s", mac, err)
+			return nil, nil, fmt.Errorf("error while parsing MAC '%s': %s", normalizedMac, err)
 		}
 
 		macs = append(macs, hw)
 		targets = strings.Replace(targets, mac, "", -1)
 	}
 	targets = strings.Trim(targets, ", ")
+
+	// fmt.Printf("targets=%s macs=%#v\n", targets, macs)
 
 	// check and resolve aliases
 	for _, targetAlias := range aliasParser.FindAllString(targets, -1) {
@@ -137,7 +139,7 @@ func ParseTargets(targets string, aliasMap *data.UnsortedKV) (ips []net.IP, macs
 	if targets != "" {
 		list, err := iprange.ParseList(targets)
 		if err != nil {
-			return nil, nil, fmt.Errorf("error while parsing address list '%s': %s.", targets, err)
+			return nil, nil, fmt.Errorf("error while parsing address list '%s': %s", targets, err)
 		}
 
 		ips = list.Expand()
@@ -277,7 +279,11 @@ func SetWiFiRegion(region string) error {
 
 func ActivateInterface(name string) error {
 	if out, err := core.Exec("ifconfig", []string{name, "up"}); err != nil {
-		return err
+		if out != "" {
+			return fmt.Errorf("%v: %s", err, out)
+		} else {
+			return err
+		}
 	} else if out != "" {
 		return fmt.Errorf("unexpected output while activating interface %s: %s", name, out)
 	}
@@ -285,7 +291,13 @@ func ActivateInterface(name string) error {
 }
 
 func SetInterfaceTxPower(name string, txpower int) error {
-	if core.HasBinary("iwconfig") {
+	if core.HasBinary("iw") {
+		Debug("SetInterfaceTxPower(%s, %d) iw based", name, txpower)
+		if _, err := core.Exec("iw", []string{"dev", name, "set", "txpower", "fixed", fmt.Sprintf("%d", txpower)}); err != nil {
+			return err
+		}
+	} else if core.HasBinary("iwconfig") {
+		Debug("SetInterfaceTxPower(%s, %d) iwconfig based", name, txpower)
 		if out, err := core.Exec("iwconfig", []string{name, "txpower", fmt.Sprintf("%d", txpower)}); err != nil {
 			return err
 		} else if out != "" {
@@ -296,7 +308,6 @@ func SetInterfaceTxPower(name string, txpower int) error {
 }
 
 func GatewayProvidedByUser(iface *Endpoint, gateway string) (*Endpoint, error) {
-	Debug("GatewayProvidedByUser(%s) [cmd=%v opts=%v parser=%v]", gateway, IPv4RouteCmd, IPv4RouteCmdOpts, IPv4RouteParser)
 	if IPv4Validator.MatchString(gateway) {
 		Debug("valid gateway ip %s", gateway)
 		// we have the address, now we need its mac
