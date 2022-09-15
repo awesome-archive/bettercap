@@ -13,6 +13,7 @@ import (
 var (
 	openFlags      = 1057
 	wpaFlags       = 1041
+	specManFlag    = 1<<8
 	durationID     = uint16(0x013a)
 	capabilityInfo = uint16(0x0411)
 	listenInterval = uint16(3)
@@ -37,10 +38,11 @@ var (
 )
 
 type Dot11ApConfig struct {
-	SSID       string
-	BSSID      net.HardwareAddr
-	Channel    int
-	Encryption bool
+	SSID               string
+	BSSID              net.HardwareAddr
+	Channel            int
+	Encryption         bool
+	SpectrumManagement bool
 }
 
 func Dot11Info(id layers.Dot11InformationElementID, info []byte) *layers.Dot11InformationElement {
@@ -51,12 +53,14 @@ func Dot11Info(id layers.Dot11InformationElementID, info []byte) *layers.Dot11In
 	}
 }
 
-func NewDot11Beacon(conf Dot11ApConfig, seq uint16) (error, []byte) {
+func NewDot11Beacon(conf Dot11ApConfig, seq uint16, extendDot11Info ...*layers.Dot11InformationElement) (error, []byte) {
 	flags := openFlags
 	if conf.Encryption {
 		flags = wpaFlags
 	}
-
+	if conf.SpectrumManagement {
+		flags |= specManFlag
+	}
 	stack := []gopacket.SerializableLayer{
 		&layers.RadioTap{
 			DBMAntennaSignal: int8(-10),
@@ -77,13 +81,41 @@ func NewDot11Beacon(conf Dot11ApConfig, seq uint16) (error, []byte) {
 		Dot11Info(layers.Dot11InformationElementIDRates, fakeApRates),
 		Dot11Info(layers.Dot11InformationElementIDDSSet, []byte{byte(conf.Channel & 0xff)}),
 	}
-
+	for _, v := range extendDot11Info {
+		stack = append(stack, v)
+	}
 	if conf.Encryption {
 		stack = append(stack, &layers.Dot11InformationElement{
 			ID:     layers.Dot11InformationElementIDRSNInfo,
 			Length: uint8(len(fakeApWpaRSN) & 0xff),
 			Info:   fakeApWpaRSN,
 		})
+	}
+
+	return Serialize(stack...)
+}
+
+func NewDot11ProbeRequest(staMac net.HardwareAddr, seq uint16, ssid string, channel int) (error, []byte) {
+	stack := []gopacket.SerializableLayer{
+		&layers.RadioTap{},
+		&layers.Dot11{
+			Address1:       network.BroadcastHw,
+			Address2:       staMac,
+			Address3:       network.BroadcastHw,
+			Type:           layers.Dot11TypeMgmtProbeReq,
+			SequenceNumber: seq,
+		},
+		&layers.Dot11InformationElement{
+			ID:     layers.Dot11InformationElementIDSSID,
+			Length: uint8(len(ssid) & 0xff),
+			Info:   []byte(ssid),
+		},
+		Dot11Info(layers.Dot11InformationElementIDRates, []byte{0x82, 0x84, 0x8b, 0x96}),
+		Dot11Info(layers.Dot11InformationElementIDESRates, []byte{0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c}),
+		Dot11Info(layers.Dot11InformationElementIDDSSet, []byte{byte(channel & 0xff)}),
+		Dot11Info(layers.Dot11InformationElementIDHTCapabilities, []byte{0x2d, 0x40, 0x1b, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}),
+		Dot11Info(layers.Dot11InformationElementIDExtCapability, []byte{0x00, 0x00, 0x08, 0x04, 0x00, 0x00, 0x00, 0x40}),
+		Dot11Info(0xff /* HE Capabilities */, []byte{0x23, 0x01, 0x08, 0x08, 0x18, 0x00, 0x80, 0x20, 0x30, 0x02, 0x00, 0x0d, 0x00, 0x9f, 0x08, 0x00, 0x00, 0x00, 0xfd, 0xff, 0xfd, 0xff, 0x39, 0x1c, 0xc7, 0x71, 0x1c, 0x07}),
 	}
 
 	return Serialize(stack...)

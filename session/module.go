@@ -132,6 +132,10 @@ func (m *SessionModule) Fatal(format string, args ...interface{}) {
 	m.Session.Events.Log(log.FATAL, m.tag+format, args...)
 }
 
+func (m *SessionModule) Printf(format string, a ...interface{}) {
+	m.Session.Events.Printf(format, a...)
+}
+
 func (m *SessionModule) Requires(modName string) {
 	m.requires = append(m.requires, modName)
 }
@@ -230,6 +234,12 @@ func (m *SessionModule) AddHandler(h ModuleHandler) {
 func (m *SessionModule) AddParam(p *ModuleParam) *ModuleParam {
 	m.params[p.Name] = p
 	p.Register(m.Session)
+	return p
+}
+
+func (m *SessionModule) AddObservableParam(p *ModuleParam, cb EnvironmentChangedCallback) *ModuleParam {
+	m.params[p.Name] = p
+	p.RegisterObserver(m.Session, cb)
 	return p
 }
 

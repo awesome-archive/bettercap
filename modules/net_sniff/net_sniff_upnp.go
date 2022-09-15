@@ -2,6 +2,7 @@ package net_sniff
 
 import (
 	"fmt"
+	"net"
 
 	"github.com/bettercap/bettercap/packets"
 
@@ -12,8 +13,8 @@ import (
 	"github.com/evilsocket/islazy/tui"
 )
 
-func upnpParser(ip *layers.IPv4, pkt gopacket.Packet, udp *layers.UDP) bool {
-	if data := packets.UPNPGetMeta(pkt); data != nil && len(data) > 0 {
+func upnpParser(srcIP, dstIP net.IP, payload []byte, pkt gopacket.Packet, udp *layers.UDP) bool {
+	if data := packets.UPNPGetMeta(pkt); len(data) > 0 {
 		s := ""
 		for name, value := range data {
 			s += fmt.Sprintf("%s:%s ", tui.Blue(name), tui.Yellow(value))
@@ -22,13 +23,13 @@ func upnpParser(ip *layers.IPv4, pkt gopacket.Packet, udp *layers.UDP) bool {
 		NewSnifferEvent(
 			pkt.Metadata().Timestamp,
 			"upnp",
-			ip.SrcIP.String(),
-			ip.DstIP.String(),
+			srcIP.String(),
+			dstIP.String(),
 			nil,
 			"%s %s -> %s : %s",
 			tui.Wrap(tui.BACKRED+tui.FOREBLACK, "upnp"),
-			vIP(ip.SrcIP),
-			vIP(ip.DstIP),
+			vIP(srcIP),
+			vIP(dstIP),
 			str.Trim(s),
 		).Push()
 

@@ -6,11 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/bettercap/bettercap/modules/net_sniff"
+	"io"
 	"net/url"
 	"regexp"
 	"strings"
 
+	"github.com/bettercap/bettercap/modules/net_sniff"
 	"github.com/bettercap/bettercap/session"
 
 	"github.com/evilsocket/islazy/tui"
@@ -75,7 +76,7 @@ func (mod *EventsStream) dumpForm(body []byte) string {
 			if err != nil {
 				value = v
 			}
-			form = append(form, fmt.Sprintf("%s", tui.Bold(tui.Red(value))))
+			form = append(form, tui.Bold(tui.Red(value)))
 		}
 	}
 	return "\n" + strings.Join(form, "&") + "\n"
@@ -89,12 +90,21 @@ func (mod *EventsStream) dumpGZIP(body []byte) string {
 	buffer := bytes.NewBuffer(body)
 	uncompressed := bytes.Buffer{}
 	reader, err := gzip.NewReader(buffer)
-	if err != nil {
-		return mod.dumpRaw(body)
-	} else if _, err = uncompressed.ReadFrom(reader); err != nil {
-		return mod.dumpRaw(body)
+	if mod.dumpFormatHex {
+		if err != nil {
+			return mod.dumpRaw(body)
+		} else if _, err = uncompressed.ReadFrom(reader); err != nil {
+			return mod.dumpRaw(body)
+		}
+		return mod.dumpRaw(uncompressed.Bytes())
+	} else {
+		if err != nil {
+			return mod.dumpText(body)
+		} else if _, err = uncompressed.ReadFrom(reader); err != nil {
+			return mod.dumpText(body)
+		}
+		return mod.dumpText(uncompressed.Bytes())
 	}
-	return mod.dumpRaw(uncompressed.Bytes())
 }
 
 func (mod *EventsStream) dumpJSON(body []byte) string {
@@ -104,7 +114,7 @@ func (mod *EventsStream) dumpJSON(body []byte) string {
 	if err := json.Indent(&buf, body, "", "  "); err != nil {
 		pretty = string(body)
 	} else {
-		pretty = string(buf.Bytes())
+		pretty = buf.String()
 	}
 
 	return "\n" + reJsonKey.ReplaceAllString(pretty, tui.Green(`$1:`)) + "\n"
@@ -119,11 +129,11 @@ func (mod *EventsStream) dumpRaw(body []byte) string {
 	return "\n" + hex.Dump(body) + "\n"
 }
 
-func (mod *EventsStream) viewHttpRequest(e session.Event) {
+func (mod *EventsStream) viewHttpRequest(output io.Writer, e session.Event) {
 	se := e.Data.(net_sniff.SnifferEvent)
 	req := se.Data.(net_sniff.HTTPRequest)
 
-	fmt.Fprintf(mod.output, "[%s] [%s] %s\n",
+	fmt.Fprintf(output, "[%s] [%s] %s\n",
 		e.Time.Format(mod.timeFormat),
 		tui.Green(e.Tag),
 		se.Message)
@@ -149,19 +159,23 @@ func (mod *EventsStream) viewHttpRequest(e session.Event) {
 			} else if req.IsType("application/json") {
 				dump += mod.dumpJSON(req.Body)
 			} else {
-				dump += mod.dumpRaw(req.Body)
+				if mod.dumpFormatHex {
+					dump += mod.dumpRaw(req.Body)
+				} else {
+					dump += mod.dumpText(req.Body)
+				}
 			}
 		}
 
-		fmt.Fprintf(mod.output, "\n%s\n", dump)
+		fmt.Fprintf(output, "\n%s\n", dump)
 	}
 }
 
-func (mod *EventsStream) viewHttpResponse(e session.Event) {
+func (mod *EventsStream) viewHttpResponse(output io.Writer, e session.Event) {
 	se := e.Data.(net_sniff.SnifferEvent)
 	res := se.Data.(net_sniff.HTTPResponse)
 
-	fmt.Fprintf(mod.output, "[%s] [%s] %s\n",
+	fmt.Fprintf(output, "[%s] [%s] %s\n",
 		e.Time.Format(mod.timeFormat),
 		tui.Green(e.Tag),
 		se.Message)
@@ -185,14 +199,14 @@ func (mod *EventsStream) viewHttpResponse(e session.Event) {
 			}
 		}
 
-		fmt.Fprintf(mod.output, "\n%s\n", dump)
+		fmt.Fprintf(output, "\n%s\n", dump)
 	}
 }
 
-func (mod *EventsStream) viewHttpEvent(e session.Event) {
+func (mod *EventsStream) viewHttpEvent(output io.Writer, e session.Event) {
 	if e.Tag == "net.sniff.http.request" {
-		mod.viewHttpRequest(e)
+		mod.viewHttpRequest(output, e)
 	} else if e.Tag == "net.sniff.http.response" {
-		mod.viewHttpResponse(e)
+		mod.viewHttpResponse(output, e)
 	}
 }

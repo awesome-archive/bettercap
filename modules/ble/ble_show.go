@@ -1,10 +1,8 @@
 // +build !windows
-// +build !darwin
 
 package ble
 
 import (
-	"os"
 	"sort"
 	"time"
 
@@ -15,8 +13,7 @@ import (
 )
 
 var (
-	bleAliveInterval   = time.Duration(5) * time.Second
-	blePresentInterval = time.Duration(30) * time.Second
+	bleAliveInterval = time.Duration(5) * time.Second
 )
 
 func (mod *BLERecon) getRow(dev *network.BLEDevice, withName bool) []string {
@@ -27,6 +24,7 @@ func (mod *BLERecon) getRow(dev *network.BLEDevice, withName bool) []string {
 	sinceSeen := time.Since(dev.LastSeen)
 	lastSeen := dev.LastSeen.Format("15:04:05")
 
+	blePresentInterval := time.Duration(mod.devTTL) * time.Second
 	if sinceSeen <= bleAliveInterval {
 		lastSeen = tui.Bold(lastSeen)
 	} else if sinceSeen > blePresentInterval {
@@ -65,7 +63,7 @@ func (mod *BLERecon) doFilter(dev *network.BLEDevice) bool {
 		mod.selector.Expression.MatchString(dev.Vendor)
 }
 
-func (mod *BLERecon) doSelection() (err error, devices []*network.BLEDevice) {
+func (mod *BLERecon) doSelection() (devices []*network.BLEDevice, err error) {
 	if err = mod.selector.Update(); err != nil {
 		return
 	}
@@ -128,7 +126,7 @@ func (mod *BLERecon) colNames(withName bool) []string {
 }
 
 func (mod *BLERecon) Show() error {
-	err, devices := mod.doSelection()
+	devices, err := mod.doSelection()
 	if err != nil {
 		return err
 	}
@@ -147,7 +145,7 @@ func (mod *BLERecon) Show() error {
 	}
 
 	if len(rows) > 0 {
-		tui.Table(os.Stdout, mod.colNames(hasName), rows)
+		tui.Table(mod.Session.Events.Stdout, mod.colNames(hasName), rows)
 		mod.Session.Refresh()
 	}
 

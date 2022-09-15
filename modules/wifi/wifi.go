@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -32,6 +33,8 @@ type WiFiModule struct {
 	region              string
 	txPower             int
 	minRSSI             int
+	apTTL               int
+	staTTL              int
 	channel             int
 	hopPeriod           time.Duration
 	hopChanges          chan bool
@@ -39,18 +42,26 @@ type WiFiModule struct {
 	ap                  *network.AccessPoint
 	stickChan           int
 	shakesFile          string
+	shakesAggregate     bool
 	skipBroken          bool
 	pktSourceChan       chan gopacket.Packet
 	pktSourceChanClosed bool
 	deauthSkip          []net.HardwareAddr
 	deauthSilent        bool
 	deauthOpen          bool
+	deauthAcquired      bool
 	assocSkip           []net.HardwareAddr
 	assocSilent         bool
 	assocOpen           bool
+	assocAcquired       bool
+	csaSilent           bool
+	fakeAuthSilent      bool
+	filterProbeSTA      *regexp.Regexp
+	filterProbeAP       *regexp.Regexp
 	apRunning           bool
 	showManuf           bool
 	apConfig            packets.Dot11ApConfig
+	probeMac            net.HardwareAddr
 	writes              *sync.WaitGroup
 	reads               *sync.WaitGroup
 	chanLock            *sync.Mutex
@@ -59,26 +70,33 @@ type WiFiModule struct {
 
 func NewWiFiModule(s *session.Session) *WiFiModule {
 	mod := &WiFiModule{
-		SessionModule: session.NewSessionModule("wifi", s),
-		iface:         s.Interface,
-		minRSSI:       -200,
-		channel:       0,
-		stickChan:     0,
-		hopPeriod:     250 * time.Millisecond,
-		hopChanges:    make(chan bool),
-		ap:            nil,
-		skipBroken:    true,
-		apRunning:     false,
-		deauthSkip:    []net.HardwareAddr{},
-		deauthSilent:  false,
-		deauthOpen:    false,
-		assocSkip:     []net.HardwareAddr{},
-		assocSilent:   false,
-		assocOpen:     false,
-		showManuf:     false,
-		writes:        &sync.WaitGroup{},
-		reads:         &sync.WaitGroup{},
-		chanLock:      &sync.Mutex{},
+		SessionModule:   session.NewSessionModule("wifi", s),
+		iface:           s.Interface,
+		minRSSI:         -200,
+		apTTL:           300,
+		staTTL:          300,
+		channel:         0,
+		stickChan:       0,
+		hopPeriod:       250 * time.Millisecond,
+		hopChanges:      make(chan bool),
+		ap:              nil,
+		skipBroken:      true,
+		apRunning:       false,
+		deauthSkip:      []net.HardwareAddr{},
+		deauthSilent:    false,
+		deauthOpen:      false,
+		deauthAcquired:  false,
+		assocSkip:       []net.HardwareAddr{},
+		assocSilent:     false,
+		assocOpen:       false,
+		assocAcquired:   false,
+		csaSilent:       false,
+		fakeAuthSilent:  false,
+		showManuf:       false,
+		shakesAggregate: true,
+		writes:          &sync.WaitGroup{},
+		reads:           &sync.WaitGroup{},
+		chanLock:        &sync.Mutex{},
 	}
 
 	mod.InitState("channels")
@@ -132,9 +150,43 @@ func NewWiFiModule(s *session.Session) *WiFiModule {
 			return err
 		}))
 
-	mod.AddParam(session.NewIntParameter("wifi.rssi.min",
+	mod.AddHandler(session.NewModuleHandler("wifi.client.probe.sta.filter FILTER", "wifi.client.probe.sta.filter (.+)",
+		"Use this regular expression on the station address to filter client probes, 'clear' to reset the filter.",
+		func(args []string) (err error) {
+			filter := args[0]
+			if filter == "clear" {
+				mod.filterProbeSTA = nil
+				return
+			} else if mod.filterProbeSTA, err = regexp.Compile(filter); err != nil {
+				return
+			}
+			return
+		}))
+
+	mod.AddHandler(session.NewModuleHandler("wifi.client.probe.ap.filter FILTER", "wifi.client.probe.ap.filter (.+)",
+		"Use this regular expression on the access point name to filter client probes, 'clear' to reset the filter.",
+		func(args []string) (err error) {
+			filter := args[0]
+			if filter == "clear" {
+				mod.filterProbeAP = nil
+				return
+			} else if mod.filterProbeAP, err = regexp.Compile(filter); err != nil {
+				return
+			}
+			return
+		}))
+
+	minRSSI := session.NewIntParameter("wifi.rssi.min",
 		"-200",
-		"Minimum WiFi signal strength in dBm."))
+		"Minimum WiFi signal strength in dBm.")
+
+	mod.AddObservableParam(minRSSI, func(v string) {
+		if err, v := minRSSI.Get(s); err != nil {
+			mod.Error("%v", err)
+		} else if mod.minRSSI = v.(int); mod.Started {
+			mod.Info("wifi.rssi.min set to %d", mod.minRSSI)
+		}
+	})
 
 	deauth := session.NewModuleHandler("wifi.deauth BSSID", `wifi\.deauth ((?:[a-fA-F0-9:]{11,})|all|\*)`,
 		"Start a 802.11 deauth attack, if an access point BSSID is provided, every client will be deauthenticated, otherwise only the selected client. Use 'all', '*' or a broadcast BSSID (ff:ff:ff:ff:ff:ff) to iterate every access point with at least one client and start a deauth attack for each one.",
@@ -153,6 +205,64 @@ func NewWiFiModule(s *session.Session) *WiFiModule {
 
 	mod.AddHandler(deauth)
 
+	probe := session.NewModuleHandler("wifi.probe BSSID ESSID",
+		`wifi\.probe\s+([a-fA-F0-9:]{11,})\s+([^\s].+)`,
+		"Sends a fake client probe with the given station BSSID, searching for ESSID.",
+		func(args []string) (err error) {
+			if mod.probeMac, err = net.ParseMAC(args[0]); err != nil {
+				return err
+			}
+			return mod.startProbing(mod.probeMac, args[1])
+		})
+
+	probe.Complete("wifi.probe", s.WiFiCompleterFull)
+
+	mod.AddHandler(probe)
+
+	channelSwitchAnnounce := session.NewModuleHandler("wifi.channel_switch_announce bssid channel ", `wifi\.channel_switch_announce ((?:[a-fA-F0-9:]{11,}))\s+((?:[0-9]+))`,
+		"Start a 802.11 channel hop attack, all client will be force to change the channel lead to connection down.",
+		func(args []string) error {
+			bssid, err := net.ParseMAC(args[0])
+			if err != nil {
+				return err
+			}
+			channel, _ := strconv.Atoi(args[1])
+			if channel > 180 || channel < 1 {
+				return fmt.Errorf("%d is not a valid channel number", channel)
+			}
+			return mod.startCSA(bssid, int8(channel))
+		})
+
+	channelSwitchAnnounce.Complete("wifi.channel_switch_announce", s.WiFiCompleterFull)
+
+	mod.AddHandler(channelSwitchAnnounce)
+
+	fakeAuth := session.NewModuleHandler("wifi.fake_auth bssid client", `wifi\.fake_auth ((?:[a-fA-F0-9:]{11,}))\s+((?:[a-fA-F0-9:]{11,}))`,
+		"send an fake authentication with client mac to ap lead to client disconnect",
+		func(args []string) error {
+			bssid, err := net.ParseMAC(args[0])
+			if err != nil {
+				return err
+			}
+			client, err := net.ParseMAC(args[1])
+			if err != nil {
+				return err
+			}
+			return mod.startFakeAuth(bssid, client)
+		})
+
+	fakeAuth.Complete("wifi.fake_auth", s.WiFiCompleterFull)
+
+	mod.AddHandler(fakeAuth)
+
+	mod.AddParam(session.NewBoolParameter("wifi.channel_switch_announce.silent",
+		"false",
+		"If true, messages from wifi.channel_switch_announce will be suppressed."))
+
+	mod.AddParam(session.NewBoolParameter("wifi.fake_auth.silent",
+		"false",
+		"If true, messages from wifi.fake_auth will be suppressed."))
+
 	mod.AddParam(session.NewStringParameter("wifi.deauth.skip",
 		"",
 		"",
@@ -165,6 +275,10 @@ func NewWiFiModule(s *session.Session) *WiFiModule {
 	mod.AddParam(session.NewBoolParameter("wifi.deauth.open",
 		"true",
 		"Send wifi deauth packets to open networks."))
+
+	mod.AddParam(session.NewBoolParameter("wifi.deauth.acquired",
+		"false",
+		"Send wifi deauth packets from AP's for which key material was already acquired."))
 
 	assoc := session.NewModuleHandler("wifi.assoc BSSID", `wifi\.assoc ((?:[a-fA-F0-9:]{11,})|all|\*)`,
 		"Send an association request to the selected BSSID in order to receive a RSN PMKID key. Use 'all', '*' or a broadcast BSSID (ff:ff:ff:ff:ff:ff) to iterate for every access point.",
@@ -182,6 +296,30 @@ func NewWiFiModule(s *session.Session) *WiFiModule {
 	assoc.Complete("wifi.assoc", s.WiFiCompleter)
 
 	mod.AddHandler(assoc)
+
+	apTTL := session.NewIntParameter("wifi.ap.ttl",
+		"300",
+		"Seconds of inactivity for an access points to be considered not in range anymore.")
+
+	mod.AddObservableParam(apTTL, func(v string) {
+		if err, v := apTTL.Get(s); err != nil {
+			mod.Error("%v", err)
+		} else if mod.apTTL = v.(int); mod.Started {
+			mod.Info("wifi.ap.ttl set to %d", mod.apTTL)
+		}
+	})
+
+	staTTL := session.NewIntParameter("wifi.sta.ttl",
+		"300",
+		"Seconds of inactivity for a client station to be considered not in range or not connected to its access point anymore.")
+
+	mod.AddObservableParam(staTTL, func(v string) {
+		if err, v := staTTL.Get(s); err != nil {
+			mod.Error("%v", err)
+		} else if mod.staTTL = v.(int); mod.Started {
+			mod.Info("wifi.sta.ttl set to %d", mod.staTTL)
+		}
+	})
 
 	mod.AddParam(session.NewStringParameter("wifi.region",
 		"",
@@ -205,6 +343,10 @@ func NewWiFiModule(s *session.Session) *WiFiModule {
 		"false",
 		"Send association requests to open networks."))
 
+	mod.AddParam(session.NewBoolParameter("wifi.assoc.acquired",
+		"false",
+		"Send association to AP's for which key material was already acquired."))
+
 	mod.AddHandler(session.NewModuleHandler("wifi.ap", "",
 		"Inject fake management beacons in order to create a rogue access point.",
 		func(args []string) error {
@@ -219,6 +361,10 @@ func NewWiFiModule(s *session.Session) *WiFiModule {
 		"~/bettercap-wifi-handshakes.pcap",
 		"",
 		"File path of the pcap file to save handshakes to."))
+
+	mod.AddParam(session.NewBoolParameter("wifi.handshakes.aggregate",
+		"true",
+		"If true, all handshakes will be saved inside a single file, otherwise a folder with per-network pcap files will be created."))
 
 	mod.AddParam(session.NewStringParameter("wifi.ap.ssid",
 		"FreeWiFi",
@@ -283,7 +429,9 @@ func NewWiFiModule(s *session.Session) *WiFiModule {
 
 			if len(freqs) == 0 {
 				mod.Debug("resetting hopping channels")
-				if freqs, err = network.GetSupportedFrequencies(mod.iface.Name()); err != nil {
+				if mod.iface == nil {
+					return fmt.Errorf("wifi.interface not set or not found")
+				} else if freqs, err = network.GetSupportedFrequencies(mod.iface.Name()); err != nil {
 					return err
 				}
 			}
@@ -348,6 +496,12 @@ func (mod *WiFiModule) Configure() error {
 	var hopPeriod int
 	var err error
 
+	if err, mod.apTTL = mod.IntParam("wifi.ap.ttl"); err != nil {
+		return err
+	} else if err, mod.staTTL = mod.IntParam("wifi.sta.ttl"); err != nil {
+		return err
+	}
+
 	if err, mod.region = mod.StringParam("wifi.region"); err != nil {
 		return err
 	} else if err, mod.txPower = mod.IntParam("wifi.txpower"); err != nil {
@@ -358,7 +512,9 @@ func (mod *WiFiModule) Configure() error {
 		return err
 	}
 
-	if err, mod.shakesFile = mod.StringParam("wifi.handshakes.file"); err != nil {
+	if err, mod.shakesAggregate = mod.BoolParam("wifi.handshakes.aggregate"); err != nil {
+		return err
+	} else if err, mod.shakesFile = mod.StringParam("wifi.handshakes.file"); err != nil {
 		return err
 	} else if mod.shakesFile != "" {
 		if mod.shakesFile, err = fs.Expand(mod.shakesFile); err != nil {
@@ -373,6 +529,8 @@ func (mod *WiFiModule) Configure() error {
 		ifName = mod.iface.Name()
 	} else if mod.iface, err = network.FindInterface(ifName); err != nil {
 		return fmt.Errorf("could not find interface %s: %v", ifName, err)
+	} else if mod.iface == nil {
+		return fmt.Errorf("could not find interface %s", ifName)
 	}
 
 	mod.Info("using interface %s (%s)", ifName, mod.iface.HwAddress)
@@ -392,43 +550,39 @@ func (mod *WiFiModule) Configure() error {
 
 		if mod.txPower > 0 {
 			if err := network.SetInterfaceTxPower(ifName, mod.txPower); err != nil {
-				mod.Warning("could not set interface %s txpower to %d, 'Set Tx Power' requests not supported", ifName, mod.txPower)
+				mod.Warning("could not set interface %s txpower to %d, 'Set Tx Power' requests not supported: %v", ifName, mod.txPower, err)
 			} else {
 				mod.Debug("interface %s txpower set to %d", ifName, mod.txPower)
 			}
 		}
 
+		/*
+		 * We don't want to pcap.BlockForever otherwise pcap_close(handle)
+		 * could hang waiting for a timeout to expire ...
+		 */
+		opts := network.CAPTURE_DEFAULTS
+		opts.Timeout = 500 * time.Millisecond
+		opts.Monitor = true
+
 		for retry := 0; ; retry++ {
-			ihandle, err := pcap.NewInactiveHandle(ifName)
-			if err != nil {
-				return fmt.Errorf("error while opening interface %s: %s", ifName, err)
-			}
-			defer ihandle.CleanUp()
-
-			if err = ihandle.SetRFMon(true); err != nil {
-				return fmt.Errorf("error while setting interface %s in monitor mode: %s", tui.Bold(ifName), err)
-			} else if err = ihandle.SetSnapLen(65536); err != nil {
-				return fmt.Errorf("error while settng span len: %s", err)
-			}
-			/*
-			 * We don't want to pcap.BlockForever otherwise pcap_close(handle)
-			 * could hang waiting for a timeout to expire ...
-			 */
-			readTimeout := 500 * time.Millisecond
-			if err = ihandle.SetTimeout(readTimeout); err != nil {
-				return fmt.Errorf("error while setting timeout: %s", err)
-			} else if mod.handle, err = ihandle.Activate(); err != nil {
-				if retry == 0 && err.Error() == ErrIfaceNotUp {
-					mod.Debug("interface %s is down, bringing it up ...", ifName)
-					if err := network.ActivateInterface(ifName); err != nil {
-						return err
-					}
-					continue
+			if mod.handle, err = network.CaptureWithOptions(ifName, opts); err == nil {
+				// we're done
+				break
+			} else if retry == 0 && err.Error() == ErrIfaceNotUp {
+				// try to bring interface up and try again
+				mod.Info("interface %s is down, bringing it up ...", ifName)
+				if err := network.ActivateInterface(ifName); err != nil {
+					return err
 				}
+				continue
+			} else if !opts.Monitor {
+				// second fatal error, just bail
 				return fmt.Errorf("error while activating handle: %s", err)
+			} else {
+				// first fatal error, try again without setting the interface in monitor mode
+				mod.Warning("error while activating handle: %s, %s", err, tui.Bold("interface might already be monitoring. retrying!"))
+				opts.Monitor = false
 			}
-
-			break
 		}
 	}
 
@@ -550,6 +704,7 @@ func (mod *WiFiModule) Start() error {
 				mod.discoverAccessPoints(radiotap, dot11, packet)
 				mod.discoverClients(radiotap, dot11, packet)
 				mod.discoverHandshakes(radiotap, dot11, packet)
+				mod.discoverDeauths(radiotap, dot11, packet)
 				mod.updateInfo(dot11, packet)
 				mod.updateStats(dot11, packet)
 			}

@@ -16,10 +16,11 @@ import (
 const (
 	IPv4Validator = `^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$`
 	IPv6Validator = `^[:a-fA-F0-9]{6,}$`
+	IPValidator   = `^[\.:a-fA-F0-9]{6,}$`
 )
 
 type ModuleHandler struct {
-	sync.Mutex
+	*sync.Mutex
 
 	Name        string
 	Description string
@@ -30,6 +31,7 @@ type ModuleHandler struct {
 
 func NewModuleHandler(name string, expr string, desc string, exec func(args []string) error) ModuleHandler {
 	h := ModuleHandler{
+		Mutex:       &sync.Mutex{},
 		Name:        name,
 		Description: desc,
 		Parser:      nil,

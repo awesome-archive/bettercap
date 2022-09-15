@@ -1,6 +1,7 @@
 *.sw*
 *.tar.gz
 *.prof*
+_example/config.js
 pcaps
 build
 bettercap
@@ -12,3 +13,4 @@ snap/
 stage/
 
 /snap
+.idea

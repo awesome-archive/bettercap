@@ -2,6 +2,7 @@ package events_stream
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"sync"
@@ -27,7 +28,7 @@ type EventsStream struct {
 	session.SessionModule
 	timeFormat    string
 	outputName    string
-	output        *os.File
+	output        io.Writer
 	rotation      rotation
 	triggerList   *TriggerList
 	waitFor       string
@@ -36,6 +37,7 @@ type EventsStream struct {
 	quit          chan bool
 	dumpHttpReqs  bool
 	dumpHttpResp  bool
+	dumpFormatHex bool
 }
 
 func NewEventsStream(s *session.Session) *EventsStream {
@@ -148,13 +150,13 @@ func NewEventsStream(s *session.Session) *EventsStream {
 		"Print the list of filters used to ignore events.",
 		func(args []string) error {
 			if mod.Session.EventsIgnoreList.Empty() {
-				fmt.Printf("Ignore filters list is empty.\n")
+				mod.Printf("Ignore filters list is empty.\n")
 			} else {
 				mod.Session.EventsIgnoreList.RLock()
 				defer mod.Session.EventsIgnoreList.RUnlock()
 
 				for _, filter := range mod.Session.EventsIgnoreList.Filters() {
-					fmt.Printf("  '%s'\n", string(filter))
+					mod.Printf("  '%s'\n", string(filter))
 				}
 			}
 			return nil
@@ -214,18 +216,22 @@ func NewEventsStream(s *session.Session) *EventsStream {
 		"false",
 		"If true all HTTP responses will be dumped."))
 
+	mod.AddParam(session.NewBoolParameter("events.stream.http.format.hex",
+		"true",
+		"If true dumped HTTP bodies will be in hexadecimal format."))
+
 	return mod
 }
 
-func (mod EventsStream) Name() string {
+func (mod *EventsStream) Name() string {
 	return "events.stream"
 }
 
-func (mod EventsStream) Description() string {
+func (mod *EventsStream) Description() string {
 	return "Print events as a continuous stream."
 }
 
-func (mod EventsStream) Author() string {
+func (mod *EventsStream) Author() string {
 	return "Simone Margaritelli <evilsocket@gmail.com>"
 }
 
@@ -237,6 +243,9 @@ func (mod *EventsStream) Configure() (err error) {
 			mod.output = os.Stdout
 		} else if mod.outputName, err = fs.Expand(output); err == nil {
 			mod.output, err = os.OpenFile(mod.outputName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -257,6 +266,8 @@ func (mod *EventsStream) Configure() (err error) {
 	if err, mod.dumpHttpReqs = mod.BoolParam("events.stream.http.request.dump"); err != nil {
 		return err
 	} else if err, mod.dumpHttpResp = mod.BoolParam("events.stream.http.response.dump"); err != nil {
+		return err
+	} else if err, mod.dumpFormatHex = mod.BoolParam("events.stream.http.format.hex"); err != nil {
 		return err
 	}
 
@@ -312,7 +323,7 @@ func (mod *EventsStream) Show(limit int) error {
 	}
 
 	if numSelected := len(selected); numSelected > 0 {
-		fmt.Println()
+		mod.Printf("\n")
 		for i := range selected {
 			mod.View(selected[numSelected-1-i], false)
 		}
@@ -350,7 +361,9 @@ func (mod *EventsStream) Stop() error {
 	return mod.SetRunning(false, func() {
 		mod.quit <- true
 		if mod.output != os.Stdout {
-			mod.output.Close()
+			if fp, ok := mod.output.(*os.File); ok {
+				fp.Close()
+			}
 		}
 	})
 }

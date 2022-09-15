@@ -3,6 +3,8 @@ package network
 import (
 	"net"
 	"testing"
+
+	"github.com/evilsocket/islazy/data"
 )
 
 func TestIsZeroMac(t *testing.T) {
@@ -35,10 +37,18 @@ func TestNormalizeMac(t *testing.T) {
 
 // TODO: refactor to parse targets with an actual alias map
 func TestParseTargets(t *testing.T) {
+	aliasMap, err := data.NewMemUnsortedKV()
+	if err != nil {
+		panic(err)
+	}
+
+	aliasMap.Set("5c:00:0b:90:a9:f0", "test_alias")
+	aliasMap.Set("5c:00:0b:90:a9:f1", "Home_Laptop")
+
 	cases := []struct {
 		Name             string
 		InputTargets     string
-		InputAliases     *Aliases
+		InputAliases     *data.UnsortedKV
 		ExpectedIPCount  int
 		ExpectedMACCount int
 		ExpectedError    bool
@@ -48,16 +58,24 @@ func TestParseTargets(t *testing.T) {
 		{
 			"empty target string causes empty return",
 			"",
-			&Aliases{},
+			&data.UnsortedKV{},
 			0,
 			0,
 			false,
 		},
 		{
 			"MACs are parsed",
-			"192.168.1.2, 192.168.1.3, 5c:00:0b:90:a9:f0, 6c:00:0b:90:a9:f0",
-			&Aliases{},
+			"192.168.1.2, 192.168.1.3, 5c:00:0b:90:a9:f0, 6c:00:0b:90:a9:f0, 6C:00:0B:90:A9:F0",
+			&data.UnsortedKV{},
 			2,
+			3,
+			false,
+		},
+		{
+			"Aliases are parsed",
+			"test_alias, Home_Laptop",
+			aliasMap,
+			0,
 			2,
 			false,
 		},

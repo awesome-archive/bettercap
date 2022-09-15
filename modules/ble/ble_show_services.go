@@ -1,12 +1,10 @@
 // +build !windows
-// +build !darwin
 
 package ble
 
 import (
 	"encoding/binary"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
@@ -407,7 +405,7 @@ func (mod *BLERecon) showServices(p gatt.Peripheral, services []*gatt.Service) {
 	if wantsToWrite && !foundToWrite {
 		mod.Error("writable characteristics %s not found.", mod.writeUUID)
 	} else {
-		tui.Table(os.Stdout, columns, rows)
+		tui.Table(mod.Session.Events.Stdout, columns, rows)
 		mod.Session.Refresh()
 	}
 }

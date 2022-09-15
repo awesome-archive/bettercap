@@ -29,11 +29,19 @@ const (
 
 var (
 	BroadcastHw        = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	IPv4Validator      = regexp.MustCompile(`^[0-9\.]+/?\d*$`)
-	IPv4RangeValidator = regexp.MustCompile(`^[0-9\.\-]+/?\d*$`)
-	MACValidator       = regexp.MustCompile(`(?i)^[a-f0-9]{1,2}:[a-f0-9]{1,2}:[a-f0-9]{1,2}:[a-f0-9]{1,2}:[a-f0-9]{1,2}:[a-f0-9]{1,2}$`)
+	IPv4BlockValidator = regexp.MustCompile(`^` +
+		`(?:(?:25[0-5]|2[0-4][0-9]|[1][0-9]{2}|[1-9]?[0-9])\.){3}` +
+		`(?:25[0-5]|2[0-4][0-9]|[1][0-9]{2}|[1-9]?[0-9])` +
+		`/(?:3[0-2]|2[0-9]|[1]?[0-9])` + `$`)
+	IPv4RangeValidator = regexp.MustCompile(`^` +
+		`(?:(?:(?:25[0-5]|2[0-4][0-9]|[1][0-9]{2}|[1-9]?[0-9])-)?(?:25[0-5]|2[0-4][0-9]|[1][0-9]{2}|[1-9]?[0-9])\.){3}` +
+		`(?:(?:25[0-5]|2[0-4][0-9]|[1][0-9]{2}|[1-9]?[0-9])-)?(?:25[0-5]|2[0-4][0-9]|[1][0-9]{2}|[1-9]?[0-9])` + `$`)
+	IPv4Validator = regexp.MustCompile(`^` +
+		`(?:(?:25[0-5]|2[0-4][0-9]|[1][0-9]{2}|[1-9]?[0-9])\.){3}` +
+		`(?:25[0-5]|2[0-4][0-9]|[1][0-9]{2}|[1-9]?[0-9])` + `$`)
+	MACValidator = regexp.MustCompile(`(?i)^(?:[a-f0-9]{2}:){5}[a-f0-9]{2}$`)
 	// lulz this sounds like a hamburger
-	macParser   = regexp.MustCompile(`(?i)([a-f0-9]{1,2}:[a-f0-9]{1,2}:[a-f0-9]{1,2}:[a-f0-9]{1,2}:[a-f0-9]{1,2}:[a-f0-9]{1,2})`)
+	macParser   = regexp.MustCompile(`(?i)((?:[a-f0-9]{2}:){5}[a-f0-9]{2})`)
 	aliasParser = regexp.MustCompile(`(?i)([a-z_][a-z_0-9]+)`)
 )
 
@@ -101,16 +109,18 @@ func ParseTargets(targets string, aliasMap *data.UnsortedKV) (ips []net.IP, macs
 
 	// first isolate MACs and parse them
 	for _, mac := range macParser.FindAllString(targets, -1) {
-		mac = NormalizeMac(mac)
-		hw, err := net.ParseMAC(mac)
+		normalizedMac := NormalizeMac(mac)
+		hw, err := net.ParseMAC(normalizedMac)
 		if err != nil {
-			return nil, nil, fmt.Errorf("error while parsing MAC '%s': %s", mac, err)
+			return nil, nil, fmt.Errorf("error while parsing MAC '%s': %s", normalizedMac, err)
 		}
 
 		macs = append(macs, hw)
 		targets = strings.Replace(targets, mac, "", -1)
 	}
 	targets = strings.Trim(targets, ", ")
+
+	// fmt.Printf("targets=%s macs=%#v\n", targets, macs)
 
 	// check and resolve aliases
 	for _, targetAlias := range aliasParser.FindAllString(targets, -1) {
@@ -137,7 +147,7 @@ func ParseTargets(targets string, aliasMap *data.UnsortedKV) (ips []net.IP, macs
 	if targets != "" {
 		list, err := iprange.ParseList(targets)
 		if err != nil {
-			return nil, nil, fmt.Errorf("error while parsing address list '%s': %s.", targets, err)
+			return nil, nil, fmt.Errorf("error while parsing address list '%s': %s", targets, err)
 		}
 
 		ips = list.Expand()
@@ -186,17 +196,16 @@ func buildEndpointFromInterface(iface net.Interface) (*Endpoint, error) {
 
 	for _, a := range addrs {
 		address := a.String()
-		if IPv4Validator.MatchString(address) {
-			if !strings.ContainsRune(address, '/') {
-				// plain ip
-				e.SetIP(address)
-			} else {
-				// ip/bits
-				e.SetNetwork(address)
-			}
-		} else {
-			// ipv6/xxx
+		switch true {
+		case IPv4Validator.MatchString(address):
+			e.SetIP(address)
+			break
+		case IPv4BlockValidator.MatchString(address):
+			e.SetNetwork(address)
+			break
+		default:
 			e.SetIPv6(address)
+			break
 		}
 	}
 
@@ -245,7 +254,7 @@ func FindInterface(name string) (*Endpoint, error) {
 
 	// user did not provide an interface name,
 	// return the first one with a valid ipv4
-	// address
+	// address that does not loop back
 	for _, iface := range ifaces {
 		addrs, err := iface.Addrs()
 		if err != nil {
@@ -255,7 +264,7 @@ func FindInterface(name string) (*Endpoint, error) {
 
 		for _, address := range addrs {
 			ip := address.String()
-			if !strings.Contains(ip, "127.0.0.1") && IPv4Validator.MatchString(ip) {
+			if !strings.HasPrefix(ip, "127.0.0.1") && IPv4BlockValidator.MatchString(ip) {
 				return buildEndpointFromInterface(iface)
 			}
 		}
@@ -277,7 +286,11 @@ func SetWiFiRegion(region string) error {
 
 func ActivateInterface(name string) error {
 	if out, err := core.Exec("ifconfig", []string{name, "up"}); err != nil {
-		return err
+		if out != "" {
+			return fmt.Errorf("%v: %s", err, out)
+		} else {
+			return err
+		}
 	} else if out != "" {
 		return fmt.Errorf("unexpected output while activating interface %s: %s", name, out)
 	}
@@ -285,7 +298,13 @@ func ActivateInterface(name string) error {
 }
 
 func SetInterfaceTxPower(name string, txpower int) error {
-	if core.HasBinary("iwconfig") {
+	if core.HasBinary("iw") {
+		Debug("SetInterfaceTxPower(%s, %d) iw based", name, txpower)
+		if _, err := core.Exec("iw", []string{"dev", name, "set", "txpower", "fixed", fmt.Sprintf("%d", txpower)}); err != nil {
+			return err
+		}
+	} else if core.HasBinary("iwconfig") {
+		Debug("SetInterfaceTxPower(%s, %d) iwconfig based", name, txpower)
 		if out, err := core.Exec("iwconfig", []string{name, "txpower", fmt.Sprintf("%d", txpower)}); err != nil {
 			return err
 		} else if out != "" {
@@ -296,7 +315,6 @@ func SetInterfaceTxPower(name string, txpower int) error {
 }
 
 func GatewayProvidedByUser(iface *Endpoint, gateway string) (*Endpoint, error) {
-	Debug("GatewayProvidedByUser(%s) [cmd=%v opts=%v parser=%v]", gateway, IPv4RouteCmd, IPv4RouteCmdOpts, IPv4RouteParser)
 	if IPv4Validator.MatchString(gateway) {
 		Debug("valid gateway ip %s", gateway)
 		// we have the address, now we need its mac

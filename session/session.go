@@ -24,6 +24,7 @@ import (
 	"github.com/evilsocket/islazy/fs"
 	"github.com/evilsocket/islazy/log"
 	"github.com/evilsocket/islazy/ops"
+	"github.com/evilsocket/islazy/plugin"
 	"github.com/evilsocket/islazy/str"
 	"github.com/evilsocket/islazy/tui"
 )
@@ -89,6 +90,8 @@ type Session struct {
 	EventsIgnoreList *EventsIgnoreList
 	UnkCmdCallback   UnknownCommandCallback
 	Firewall         firewall.FirewallManager
+
+	script *Script
 }
 
 func New() (*Session, error) {
@@ -122,6 +125,10 @@ func New() (*Session, error) {
 		} else if err := pprof.StartCPUProfile(f); err != nil {
 			return nil, err
 		}
+	}
+
+	if bufSize := *s.Options.PcapBufSize; bufSize != -1 {
+		network.CAPTURE_DEFAULTS.Bufsize = bufSize
 	}
 
 	if s.Env, err = NewEnvironment(*s.Options.EnvFile); err != nil {
@@ -224,6 +231,12 @@ func (s *Session) Start() error {
 		return s.Modules[i].Name() < s.Modules[j].Name()
 	})
 
+	if *s.Options.CapletsPath != "" {
+		if err = caplets.Setup(*s.Options.CapletsPath); err != nil {
+			return err
+		}
+	}
+
 	if s.Interface, err = network.FindInterface(*s.Options.InterfaceName); err != nil {
 		return err
 	}
@@ -246,8 +259,12 @@ func (s *Session) Start() error {
 		s.Events.Log(level, "%s", err.Error())
 	}
 
+	// we are the gateway
 	if s.Gateway == nil || s.Gateway.IpAddress == s.Interface.IpAddress {
 		s.Gateway = s.Interface
+	} else {
+		// start monitoring for gateway changes
+		go s.routeMon()
 	}
 
 	s.Firewall = firewall.Make(s.Interface)
@@ -289,8 +306,24 @@ func (s *Session) Start() error {
 
 	s.startNetMon()
 
-	if *s.Options.Debug {
-		s.Events.Add("session.started", nil)
+	s.Events.Add("session.started", nil)
+
+	// register js functions here to avoid cyclic dependency between
+	// js and session
+	plugin.Defines["env"] = jsEnvFunc
+	plugin.Defines["run"] = jsRunFunc
+	plugin.Defines["fileExists"] = jsFileExistsFunc
+	plugin.Defines["loadJSON"] = jsLoadJSONFunc
+	plugin.Defines["saveJSON"] = jsSaveJSONFunc
+	plugin.Defines["onEvent"] = jsOnEventFunc
+	plugin.Defines["session"] = s
+
+	// load the script here so the session and its internal objects are ready
+	if *s.Options.Script != "" {
+		if s.script, err = LoadScript(*s.Options.Script); err != nil {
+			return fmt.Errorf("error loading %s: %v", *s.Options.Script, err)
+		}
+		log.Debug("session script %s loaded", *s.Options.Script)
 	}
 
 	return nil
@@ -299,7 +332,7 @@ func (s *Session) Start() error {
 func (s *Session) Skip(ip net.IP) bool {
 	if ip.IsLoopback() {
 		return true
-	} else if ip.Equal(s.Interface.IP) {
+	} else if ip.Equal(s.Interface.IP) || ip.Equal(s.Interface.IPv6) {
 		return true
 	} else if ip.Equal(s.Gateway.IP) {
 		return true
@@ -317,6 +350,10 @@ func (s *Session) FindMAC(ip net.IP, probe bool) (net.HardwareAddr, error) {
 	if err != nil && probe {
 		from := s.Interface.IP
 		from_hw := s.Interface.HW
+
+		if ip.To4() == nil {
+			from = s.Interface.IPv6
+		}
 
 		if err, probe := packets.NewUDPProbe(from, from_hw, ip, 139); err != nil {
 			log.Error("Error while creating UDP probe packet for %s: %s", ip.String(), err)
@@ -361,7 +398,7 @@ func (s *Session) ReadLine() (string, error) {
 }
 
 func (s *Session) RunCaplet(filename string) error {
-	err, caplet := caplets.Load(filename)
+	caplet, err := caplets.Load(filename)
 	if err != nil {
 		return err
 	}
@@ -382,7 +419,7 @@ func parseCapletCommand(line string) (is bool, caplet *caplets.Caplet, argv []st
 		argv = parts[1:]
 	}
 
-	if err, cap := caplets.Load(file); err == nil {
+	if cap, err := caplets.Load(file); err == nil {
 		return true, cap, argv
 	}
 
